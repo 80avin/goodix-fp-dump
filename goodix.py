@@ -127,7 +127,6 @@ def check_message_protocol(data: bytes,
 
     return data[0]
 
-
 def decode_ack(data: bytes) -> Tuple[int, bool]:
     if not data[1] & 0x1:
         raise ValueError("Invalid data")
@@ -193,10 +192,10 @@ class Device:
         print("disconnect()")
 
         self.protocol.disconnect(timeout)
-
+        
     def nop(self) -> None:
         print("nop()")
-
+        
         self.protocol.write(
             encode_message_pack(
                 encode_message_protocol(b"\x00\x00\x00\x00",
