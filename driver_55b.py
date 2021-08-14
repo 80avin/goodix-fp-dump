@@ -10,8 +10,10 @@ from typing import List
 
 from crcmod.predefined import mkCrcFun
 
-from goodix import (FLAGS_TRANSPORT_LAYER_SECURITY, Device, check_message_pack,
-                    decode_image, encode_message_pack)
+from goodix import (FLAGS_TRANSPORT_LAYER_SECURITY,
+                    FLAGS_TRANSPORT_LAYER_SECURITY_DATA, Device,
+                    check_message_pack, decode_image, encode_message_pack)
+from protocol import USBProtocol
 
 TARGET_FIRMWARE: str = "GF3268_RTSEC_APP_10041"
 IAP_FIRMWARE: str = "MILAN_RTSEC_IAP_10027"
@@ -49,7 +51,7 @@ def warning(text: str) -> str:
 
 def check_psk(device: Device, tries: int = 2) -> bool:
     for _ in range(tries):
-        reply = device.preset_psk_read_r(0xbb020007)
+        reply = device.preset_psk_read(0xbb020007)
         if not reply[0]:
             raise ValueError("Failed to read PSK")
 
@@ -64,7 +66,7 @@ def check_psk(device: Device, tries: int = 2) -> bool:
 
 def erase_firmware(device: Device) -> None:
     device.mcu_erase_app(0)
-    device.wait_disconnect()
+    device.disconnect()
 
 
 def write_firmware(device: Device,
@@ -103,7 +105,7 @@ def update_firmware(device: Device,
                                      mkCrcFun("crc-32-mpeg")(firmware),
                                      firmware_hmac):
                 device.reset(False, True, 100)
-                device.wait_disconnect()
+                device.disconnect()
 
                 return
 
@@ -132,18 +134,21 @@ def setup_device(device: Device) -> None:
 def connect_device(device: Device, tls_client: socket) -> None:
     tls_client.sendall(device.request_tls_connection())
 
-    device.write(
+    device.protocol.write(
         encode_message_pack(tls_client.recv(1024),
                             FLAGS_TRANSPORT_LAYER_SECURITY))
 
     tls_client.sendall(
-        check_message_pack(device.read(), FLAGS_TRANSPORT_LAYER_SECURITY))
+        check_message_pack(device.protocol.read(),
+                           FLAGS_TRANSPORT_LAYER_SECURITY))
     tls_client.sendall(
-        check_message_pack(device.read(), FLAGS_TRANSPORT_LAYER_SECURITY))
+        check_message_pack(device.protocol.read(),
+                           FLAGS_TRANSPORT_LAYER_SECURITY))
     tls_client.sendall(
-        check_message_pack(device.read(), FLAGS_TRANSPORT_LAYER_SECURITY))
+        check_message_pack(device.protocol.read(),
+                           FLAGS_TRANSPORT_LAYER_SECURITY))
 
-    device.write(
+    device.protocol.write(
         encode_message_pack(tls_client.recv(1024),
                             FLAGS_TRANSPORT_LAYER_SECURITY))
 
@@ -155,35 +160,47 @@ def get_image(device: Device, tls_client: socket, tls_server: Popen) -> None:
         raise ValueError("Failed to upload config")
 
     device.mcu_switch_to_fdt_mode(
-        b"\x0d\x01\x80\x12\x80\xaf\x80\x9a\x80\x87\x80\x12\x80\xa8\x80\x95\x80\x81\x80\x12\x80\xa7\x80\x98\x80\x84"
-    )
+        b"\x0d\x01\x80\x12\x80\x12\x80\x98\x80\x82\x80\x12\x80\xa0\x80\x99\x80\x7f\x80\x12\x80\x9f\x80\x93\x80\x7e",
+        True)
 
-    tls_client.sendall(device.mcu_get_image())
+    tls_client.sendall(
+        device.mcu_get_image(b"\x01\x00",
+                             FLAGS_TRANSPORT_LAYER_SECURITY_DATA)[9:])
 
-    write_pgm(decode_image(tls_server.stdout.read(10573)[8:-5]), "clear.pgm")
+    write_pgm(decode_image(tls_server.stdout.read(14260)[:-4]), "clear-0.pgm")
 
     device.mcu_switch_to_fdt_mode(
-        b"\x0d\x01\x80\x12\x80\xaf\x80\x9a\x80\x87\x80\x12\x80\xa8\x80\x95\x80\x81\x80\x12\x80\xa7\x80\x98\x80\x84"
-    )
+        b"\x0d\x01\x80\x12\x80\x12\x80\x98\x80\x82\x80\x12\x80\xa0\x80\x99\x80\x7f\x80\x12\x80\x9f\x80\x93\x80\x7e",
+        True)
 
     device.mcu_switch_to_idle_mode(20)
 
     device.read_sensor_register(0x0082, 2)
 
-    print("Return early")
-    return
+    tls_client.sendall(
+        device.mcu_get_image(b"\x01\x00",
+                             FLAGS_TRANSPORT_LAYER_SECURITY_DATA)[9:])
+
+    write_pgm(decode_image(tls_server.stdout.read(14260)[:-4]), "clear-1.pgm")
 
     device.mcu_switch_to_fdt_mode(
-        b"\x0d\x01\x80\xaf\x80\xbf\x80\xa4\x80\xb8\x80\xa8\x80\xb7")
+        b"\x0d\x01\x80\x12\x80\x12\x80\x98\x80\x82\x80\x12\x80\xa0\x80\x99\x80\x7f\x80\x12\x80\x9f\x80\x93\x80\x7e",
+        True)
+
+    if not device.switch_to_sleep_mode(0x6c):
+        raise ValueError("Failed to switch to sleep mode")
 
     print("Waiting for finger...")
 
     device.mcu_switch_to_fdt_down(
-        b"\x0c\x01\x80\xaf\x80\xbf\x80\xa4\x80\xb8\x80\xa8\x80\xb7")
+        b"\x0c\x01\x80\xb0\x80\xc4\x80\xba\x80\xa6\x80\xb7\x80\xc7\x80\xc0\x80\xaa\x80\xb4\x80\xc4\x80\xba\x80\xa6"
+    )
 
-    tls_client.sendall(device.mcu_get_image())
+    tls_client.sendall(
+        device.mcu_get_image(b"\x01\x00",
+                             FLAGS_TRANSPORT_LAYER_SECURITY_DATA)[9:])
 
-    write_pgm(decode_image(tls_server.stdout.read(10573)[8:-5]),
+    write_pgm(decode_image(tls_server.stdout.read(14260)[:-4]),
               "fingerprint.pgm")
 
 
@@ -236,7 +253,7 @@ def main(product: int) -> None:
 
         previous_firmware = None
         while True:
-            device = Device(product)
+            device = Device(product, USBProtocol)
 
             device.nop()
 
@@ -262,7 +279,7 @@ def main(product: int) -> None:
 
             if fullmatch(TARGET_FIRMWARE, firmware):
                 if not valid_psk:
-                    if not device.preset_psk_write_r(0xbb010003, PSK_WHITE_BOX):
+                    if not device.preset_psk_write(0xbb010003, PSK_WHITE_BOX):
                         raise ValueError("PSK write failed")
 
                     if not check_psk(device):
@@ -277,7 +294,7 @@ def main(product: int) -> None:
 
             if fullmatch(IAP_FIRMWARE, firmware):
                 if not valid_psk:
-                    if not device.preset_psk_write_r(0xbb010003, PSK_WHITE_BOX):
+                    if not device.preset_psk_write(0xbb010003, PSK_WHITE_BOX):
                         raise ValueError("PSK write failed")
 
                     if not check_psk(device):

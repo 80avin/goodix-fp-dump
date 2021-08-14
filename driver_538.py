@@ -8,8 +8,10 @@ from subprocess import PIPE, STDOUT, Popen
 from time import sleep
 from typing import List
 
-from goodix import (FLAGS_TRANSPORT_LAYER_SECURITY, Device, check_message_pack,
+from goodix import (FLAGS_TRANSPORT_LAYER_SECURITY, Device,
+                    FLAGS_TRANSPORT_LAYER_SECURITY_DATA, check_message_pack,
                     decode_image, encode_message_pack)
+from protocol import USBProtocol
 
 TARGET_FIRMWARE: str = "GF5298_GM168SEC_APP_13016"
 IAP_FIRMWARE: str = "MILAN_GM168SEC_IAP_10007"
@@ -27,17 +29,17 @@ PMK_HASH: bytes = bytes.fromhex(
     "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925")
 
 DEVICE_CONFIG: bytes = bytes.fromhex(
-    "701160712c9d2cc91ce518fd00fd00fd03ba000180ca000400840015b3860000"
-    "c4880000ba8a0000b28c0000aa8e0000c19000bbbb9200b1b1940000a8960000"
-    "b6980000009a000000d2000000d4000000d6000000d800000050000105d00000"
+    "701160712c9d2cc91ce518fd00fd00fd03ba000180ca0008008400bec38600b1"
+    "b68800baba8a00b3b38c00bcbc8e00b1b19000bbbb9200b1b194000000960000"
+    "00980000009a000000d2000000d4000000d6000000d800000050000105d00000"
     "00700000007200785674003412200010402a0102042200012024003200800001"
-    "005c008000560004205800030232000c02660003007c000058820080152a0182"
-    "032200012024001400800001005c000001560004205800030232000c02660003"
-    "007c0000588200801f2a0108005c008000540010016200040364001900660003"
-    "007c0001582a0108005c0000015200080054000001660003007c00015800892e")
+    "005c000101560024205800010232000402660000027c00005882007f082a0182"
+    "072200012024001400800001405c00e700560006145800040232000c02660000"
+    "027c000058820080082a0108005c000101540000016200080464001000660000"
+    "027c0000582a0108005c00dc005200080054000001660000027c00005820c51d")
 
 SENSOR_WIDTH = 80
-SENSOR_HEIGHT = 88
+SENSOR_HEIGHT = 64
 
 
 def warning(text: str) -> str:
@@ -47,7 +49,7 @@ def warning(text: str) -> str:
 
 def check_psk(device: Device, tries: int = 2) -> bool:
     for _ in range(tries):
-        reply = device.preset_psk_read_r(0xbb020001, len(PMK_HASH), 0)
+        reply = device.preset_psk_read(0xbb020001, len(PMK_HASH), 0)
         if not reply[0]:
             raise ValueError("Failed to read PSK")
 
@@ -99,7 +101,7 @@ def update_firmware(device: Device,
 
             if device.check_firmware(None, None, None, firmware_hmac):
                 device.reset(False, True, 50)
-                device.wait_disconnect()
+                device.disconnect()
 
                 return
 
@@ -110,9 +112,6 @@ def update_firmware(device: Device,
             warning(f"The program went into serious problems while trying to "
                     f"update the firmware: {error}"))
 
-        print("Raising error before erasing")
-        raise error
-
         erase_firmware(device)
 
         raise error
@@ -122,79 +121,94 @@ def setup_device(device: Device) -> None:
     if not device.reset(True, False, 20)[0]:
         raise ValueError("Reset failed")
 
-    device.read_sensor_register(0x0000, 4)
+    device.read_sensor_register(0x0000, 4)  # Read chip ID (0x00a6)
 
     device.read_otp()
-
-    if not device.reset(True, False, 20)[0]:
-        raise ValueError("Reset failed")
-
-    device.mcu_switch_to_idle_mode(20)
-
-    device.write_sensor_register(0x0220, b"\x78\x0b")
-    device.write_sensor_register(0x0236, b"\xb9\x00")
-    device.write_sensor_register(0x0238, b"\xb7\x00")
-    device.write_sensor_register(0x023a, b"\xb7\x00")
-
-    if not device.upload_config_mcu(DEVICE_CONFIG):
-        raise ValueError("Failed to upload config")
-
-    if not device.set_powerdown_scan_frequency(100):
-        raise ValueError("Failed to set powerdown scan frequency")
+    # OTP: 0x4e4e53304b2e0000517681a4aa89e409085c5c96800000f0a06ca56ea0a0746ce7280400980052f0072228249fa5a10000000000000000000000000009ff0000
 
 
 def connect_device(device: Device, tls_client: socket) -> None:
     tls_client.sendall(device.request_tls_connection())
 
-    device.write(
+    device.protocol.write(
         encode_message_pack(tls_client.recv(1024),
                             FLAGS_TRANSPORT_LAYER_SECURITY))
 
     tls_client.sendall(
-        check_message_pack(device.read(), FLAGS_TRANSPORT_LAYER_SECURITY))
+        check_message_pack(device.protocol.read(),
+                           FLAGS_TRANSPORT_LAYER_SECURITY))
     tls_client.sendall(
-        check_message_pack(device.read(), FLAGS_TRANSPORT_LAYER_SECURITY))
+        check_message_pack(device.protocol.read(),
+                           FLAGS_TRANSPORT_LAYER_SECURITY))
     tls_client.sendall(
-        check_message_pack(device.read(), FLAGS_TRANSPORT_LAYER_SECURITY))
+        check_message_pack(device.protocol.read(),
+                           FLAGS_TRANSPORT_LAYER_SECURITY))
 
-    device.write(
+    device.protocol.write(
         encode_message_pack(tls_client.recv(1024),
                             FLAGS_TRANSPORT_LAYER_SECURITY))
 
     sleep(0.01)  # Important otherwise an USBTimeout error occur
 
-    device.tls_successfully_established()
-
-    device.query_mcu_state()
-
 
 def get_image(device: Device, tls_client: socket, tls_server: Popen) -> None:
-    device.mcu_switch_to_fdt_mode(
-        b"\x0d\x01\xae\xae\xbf\xbf\xa4\xa4\xb8\xb8\xa8\xa8\xb7\xb7")
-
-    device.nav_0()
+    if not device.upload_config_mcu(DEVICE_CONFIG):
+        raise ValueError("Failed to upload config")
 
     device.mcu_switch_to_fdt_mode(
-        b"\x0d\x01\x80\xaf\x80\xbf\x80\xa3\x80\xb7\x80\xa7\x80\xb6")
+        b"\x0d\x01\x28\x01\x22\x01\x28\x01\x24\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+        False)
+    device.mcu_switch_to_fdt_mode(
+        b"\x0d\x01\x28\x01\x22\x01\x28\x01\x24\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01",
+        True)
 
-    device.read_sensor_register(0x0082, 2)
+    device.write_sensor_register(0x022c, b"\x0a\x03")
 
-    tls_client.sendall(device.mcu_get_image())
+    tls_client.sendall(
+        device.mcu_get_image(b"\x01\x03\x28\x01\x22\x01\x28\x01\x24\x01",
+                             FLAGS_TRANSPORT_LAYER_SECURITY_DATA)[9:])
 
-    write_pgm(decode_image(tls_server.stdout.read(10573)[8:-5]), "clear.pgm")
+    write_pgm(decode_image(tls_server.stdout.read(7684)[:-4]), "clear-0.pgm")
+
+    device.write_sensor_register(0x022c, b"\x0a\x02")
+
+    device.write_sensor_register(0x022c, b"\x0a\x03")
+
+    tls_client.sendall(
+        device.mcu_get_image(b"\x81\x03\x28\x01\x22\x01\x28\x01\x24\x01",
+                             FLAGS_TRANSPORT_LAYER_SECURITY_DATA)[9:])
+
+    write_pgm(decode_image(tls_server.stdout.read(7684)[:-4]), "clear-1.pgm")
+
+    device.write_sensor_register(0x022c, b"\x0a\x02")
+
+    device.write_sensor_register(0x022c, b"\x0a\x03")
+
+    tls_client.sendall(
+        device.mcu_get_image(b"\x81\x03\x19\x01\x13\x01\x19\x01\x15\x01",
+                             FLAGS_TRANSPORT_LAYER_SECURITY_DATA)[9:])
+
+    write_pgm(decode_image(tls_server.stdout.read(7684)[:-4]), "clear-2.pgm")
+
+    device.write_sensor_register(0x022c, b"\x0a\x02")
 
     device.mcu_switch_to_fdt_mode(
-        b"\x0d\x01\x80\xaf\x80\xbf\x80\xa4\x80\xb8\x80\xa8\x80\xb7")
+        b"\x8d\x01\x28\x01\x22\x01\x28\x01\x24\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+        False)
+    device.mcu_switch_to_fdt_mode(
+        b"\x8d\x01\x28\x01\x22\x01\x28\x01\x24\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01",
+        True)
 
-    print("Waiting for finger...")
+    device.write_sensor_register(0x022c, b"\x0a\x03")
 
-    device.mcu_switch_to_fdt_down(
-        b"\x0c\x01\x80\xaf\x80\xbf\x80\xa4\x80\xb8\x80\xa8\x80\xb7")
+    tls_client.sendall(
+        device.mcu_get_image(b"\x81\x03\x28\x01\x22\x01\x28\x01\x24\x01",
+                             FLAGS_TRANSPORT_LAYER_SECURITY_DATA)[9:])
 
-    tls_client.sendall(device.mcu_get_image())
+    write_pgm(decode_image(tls_server.stdout.read(7684)[:-4]), "clear-3.pgm")
 
-    write_pgm(decode_image(tls_server.stdout.read(10573)[8:-5]),
-              "fingerprint.pgm")
+    print("Return early")
+    return
 
 
 def write_pgm(image: List[int], file_name: str) -> None:
@@ -246,7 +260,7 @@ def main(product: int) -> None:
 
         previous_firmware = None
 
-        device = Device(product)
+        device = Device(product, USBProtocol)
 
         device.nop()
 
@@ -270,9 +284,6 @@ def main(product: int) -> None:
                     erase_firmware(device)
                     continue
 
-                print("Return before driver")
-                return
-
                 run_driver(device)
                 return
 
@@ -282,7 +293,7 @@ def main(product: int) -> None:
 
             if fullmatch(IAP_FIRMWARE, firmware):
                 if not valid_psk:
-                    device.preset_psk_write_r(
+                    device.preset_psk_write(
                         0xbb010003, PSK_WHITE_BOX, 114, 0,
                         bytes.fromhex("56a5bb956b7c8d9e0000"))
 
@@ -291,7 +302,7 @@ def main(product: int) -> None:
 
                 update_firmware(device)
 
-                device = Device(product)
+                device = Device(product, USBProtocol)
 
                 device.nop()
 

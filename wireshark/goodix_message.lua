@@ -10,6 +10,7 @@ ack_true = ProtoField.bool("goodix.ack.true", "Always True", 2, nil, 0x01)
 ack_cmd = ProtoField.uint8("goodix.ack.cmd", "ACK Command", base.HEX)
 success = ProtoField.bool("goodix.success", "Success")
 failed = ProtoField.bool("goodix.failed", "Failed")
+number = ProtoField.uint8("goodix.number", "Number", base.HEX)
 
 version = ProtoField.string("goodix.version", "Version")
 enable_chip = ProtoField.bool("goodix.enable_chip", "Enable chip")
@@ -42,10 +43,10 @@ config_sensor_chip = ProtoField.uint8("goodix.config_sensor_chip", "Sensor Chip"
     {{0, 0, "GF3208"}, {1, 1, "GF3288"}, {2, 2, "GF3266"}}, 0xF0)
 
 protocol.fields = {pack_flags, cmd0_field, cmd1_field, length_field, checksum_field, ack_cmd, ack_true, ack_config,
-                   success, failed, version, enable_chip, sleep_time, mcu_state_image, mcu_state_tls, mcu_state_spi,
-                   mcu_state_locked, reset_sensor, reset_mcu, reset_sensor_copy, reset_number, register_multiple,
-                   register_address, read_length, powerdown_scan_frequency, config_sensor_chip, psk_flags, psk_length,
-                   firmware_offset, firmware_length, firmware_checksum}
+                   success, failed, number, version, enable_chip, sleep_time, mcu_state_image, mcu_state_tls,
+                   mcu_state_spi, mcu_state_locked, reset_sensor, reset_mcu, reset_sensor_copy, reset_number,
+                   register_multiple, register_address, read_length, powerdown_scan_frequency, config_sensor_chip,
+                   psk_flags, psk_length, firmware_offset, firmware_length, firmware_checksum}
 
 function extract_cmd0_cmd1(cmd)
     return bit.rshift(cmd, 4), bit.rshift(cmd % 16, 1)
@@ -167,6 +168,15 @@ commands = {
                 tree:add_le(success, buf(0, 1))
             end
         },
+        [1] = {
+            name = "Switch To Sleep Mode",
+            dissect_command = function(tree, buf)
+                tree:add_le(number, buf(0, 1))
+            end,
+            dissect_reply = function(tree, buf)
+                tree:add_le(success, buf(0, 1))
+            end
+        },
         [2] = {
             name = "Set Powerdown Scan Frequency",
             dissect_command = function(tree, buf)
@@ -205,6 +215,7 @@ commands = {
                 tree:add_le(sleep_time, buf(1, 1))
             end,
             dissect_reply = function(tree, buf)
+                tree:add_le(success, buf(0, 1))
             end
         },
         [3] = {
@@ -224,7 +235,7 @@ commands = {
             end
         },
         [6] = {
-            name = "Set Pov Cfg",
+            name = "Set POV Config",
             dissect_command = function(tree, buf)
             end,
             dissect_reply = function(tree, buf)
@@ -233,6 +244,7 @@ commands = {
         [7] = {
             name = "Query MCU State",
             dissect_command = function(tree, buf)
+                tree:add_le(number, buf(0, 1))
             end,
             dissect_reply = function(tree, buf)
                 tree:add_le(mcu_state_image, buf(1, 1))
@@ -258,7 +270,7 @@ commands = {
         category_name = "NOTI",
 
         [2] = {
-            name = "Set Drv State",
+            name = "Set DRV State",
             dissect_command = function(tree, buf)
             end,
             dissect_reply = function(tree, buf)
@@ -282,7 +294,7 @@ commands = {
             end
         },
         [1] = {
-            name = "Resend Image data? MCU Get Pov Image",
+            name = "Resend Image Data? MCU Get POV Image",
             dissect_command = function(tree, buf)
                 -- Seemingly gives the same response over TLS as sending Ima.0 does,
                 -- but without reading a new image from the sensor. Not seen used,
@@ -298,7 +310,7 @@ commands = {
         },
 
         [3] = {
-            name = "Pov Image Check",
+            name = "POV Image Check",
             dissect_command = function(tree, buf)
             end,
             dissect_reply = function(tree, buf)
@@ -308,7 +320,7 @@ commands = {
     [0xE] = {
         category_name = "PROD",
         [0] = {
-            name = "Preset Psk Write R",
+            name = "Preset Psk Write",
             dissect_command = function(tree, buf)
                 tree:add_le(psk_flags, buf(0, 4))
                 tree:add_le(psk_length, buf(4, 4))
@@ -318,7 +330,7 @@ commands = {
             end
         },
         [2] = {
-            name = "Preset Psk Read R",
+            name = "Preset Psk Read",
             dissect_command = function(tree, buf)
                 tree:add_le(psk_flags, buf(0, 4))
                 tree:add_le(psk_length, buf(4, 4))
@@ -529,6 +541,8 @@ end
 
 usb_table = DissectorTable.get("usb.bulk")
 
+usb_table:add(0x0a, goodix_pack)
+
 usb_table:add(0xff, goodix_pack)
 
-usb_table:add(0x0a, goodix_pack)
+usb_table:add(0xffff, goodix_pack)
